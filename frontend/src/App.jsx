@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 const API_BASE = '/api';
@@ -28,6 +28,14 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [stats, setStats] = useState({ total: 0, returned: 0 });
+  
+  // Autocomplete state
+  const [autocompleteResults, setAutocompleteResults] = useState([]);
+  const [selectedIndex, setSelectedIndex] = useState(-1);
+  const [showAutocomplete, setShowAutocomplete] = useState(false);
+  const searchWrapperRef = useRef(null);
+  const autocompleteTimeoutRef = useRef(null);
+  const autocompleteItemRefs = useRef([]);
 
   // Load initial data and suggestions on mount
   useEffect(() => {
@@ -39,6 +47,90 @@ function App() {
   useEffect(() => {
     loadEvents();
   }, [activeCategory]);
+
+  // Autocomplete: fetch suggestions as user types
+  useEffect(() => {
+    if (autocompleteTimeoutRef.current) {
+      clearTimeout(autocompleteTimeoutRef.current);
+    }
+
+    const trimmedQuery = searchQuery.trim();
+    if (!trimmedQuery || trimmedQuery.length < 2) {
+      setAutocompleteResults([]);
+      setShowAutocomplete(false);
+      setSelectedIndex(-1);
+      autocompleteItemRefs.current = [];
+      return;
+    }
+
+    autocompleteTimeoutRef.current = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams();
+        params.set('query', trimmedQuery);
+        params.set('limit', '8'); // Limit to top 8 results
+
+        const response = await fetch(`${API_BASE}/search?${params}`);
+        const data = await response.json();
+
+        if (response.ok && data.events) {
+          // Extract unique suggestions with title and category
+          const uniqueSuggestions = [];
+          const seenTitles = new Set();
+
+          for (const event of data.events) {
+            if (!seenTitles.has(event.title)) {
+              seenTitles.add(event.title);
+              uniqueSuggestions.push({
+                title: event.title,
+                category: event.category || 'Uncategorized',
+                event_ticker: event.event_ticker
+              });
+              if (uniqueSuggestions.length >= 8) break;
+            }
+          }
+
+          setAutocompleteResults(uniqueSuggestions);
+          setShowAutocomplete(uniqueSuggestions.length > 0);
+          setSelectedIndex(-1);
+        }
+      } catch (err) {
+        console.error('Autocomplete error:', err);
+        setAutocompleteResults([]);
+        setShowAutocomplete(false);
+      }
+    }, 300); // 300ms debounce
+
+    return () => {
+      if (autocompleteTimeoutRef.current) {
+        clearTimeout(autocompleteTimeoutRef.current);
+      }
+    };
+  }, [searchQuery]);
+
+  // Click outside handler
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (searchWrapperRef.current && !searchWrapperRef.current.contains(event.target)) {
+        setShowAutocomplete(false);
+        setSelectedIndex(-1);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, []);
+
+  // Scroll selected item into view
+  useEffect(() => {
+    if (selectedIndex >= 0 && autocompleteItemRefs.current[selectedIndex]) {
+      autocompleteItemRefs.current[selectedIndex].scrollIntoView({
+        behavior: 'smooth',
+        block: 'nearest'
+      });
+    }
+  }, [selectedIndex]);
 
   const loadSuggestions = async () => {
     try {
@@ -110,10 +202,56 @@ function App() {
   const handleSuggestionClick = (suggestion) => {
     setSearchQuery(suggestion.title);
     setActiveCategory('All');
+    setShowAutocomplete(false);
+    setSelectedIndex(-1);
     // Trigger search
     setTimeout(() => {
       document.querySelector('.search-form')?.dispatchEvent(new Event('submit', { bubbles: true }));
     }, 100);
+  };
+
+  const handleAutocompleteSelect = (suggestion) => {
+    if (suggestion) {
+      handleSuggestionClick(suggestion);
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (!showAutocomplete || autocompleteResults.length === 0) {
+      return; // Allow normal form submission
+    }
+
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        setSelectedIndex((prev) =>
+          prev < autocompleteResults.length - 1 ? prev + 1 : prev
+        );
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setSelectedIndex((prev) => (prev > 0 ? prev - 1 : -1));
+        break;
+      case 'Enter':
+        // Only intercept if user navigated with arrow keys
+        if (selectedIndex >= 0 && selectedIndex < autocompleteResults.length) {
+          e.preventDefault();
+          handleAutocompleteSelect(autocompleteResults[selectedIndex]);
+        } else {
+          // Close autocomplete but allow normal form submission
+          setShowAutocomplete(false);
+          setSelectedIndex(-1);
+          // Don't prevent default - let form submit with current query
+        }
+        break;
+      case 'Escape':
+        e.preventDefault();
+        setShowAutocomplete(false);
+        setSelectedIndex(-1);
+        break;
+      default:
+        break;
+    }
   };
 
   const handleCategoryClick = (category) => {
@@ -188,17 +326,49 @@ function App() {
         {/* Search Section */}
         <section className="search-section">
           <form onSubmit={handleSearch} className="search-form">
-            <div className="search-input-wrapper">
+            <div className="search-input-wrapper" ref={searchWrapperRef}>
               <span className="search-icon">🔍</span>
               <input
                 type="text"
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setShowAutocomplete(true);
+                }}
+                onKeyDown={handleKeyDown}
+                onFocus={() => {
+                  if (autocompleteResults.length > 0 && searchQuery.trim().length >= 2) {
+                    setShowAutocomplete(true);
+                  }
+                }}
                 placeholder="Search any market... bitcoin, trump, earthquake, AI..."
                 className="search-input"
               />
               {searchQuery && (
-                <button type="button" className="clear-btn" onClick={clearSearch}>✕</button>
+                <button type="button" className="clear-btn" onClick={() => {
+                  clearSearch();
+                  setShowAutocomplete(false);
+                  setSelectedIndex(-1);
+                }}>✕</button>
+              )}
+              
+              {/* Autocomplete Dropdown */}
+              {showAutocomplete && autocompleteResults.length > 0 && (
+                <div className="autocomplete-dropdown">
+                  {autocompleteResults.map((result, index) => (
+                    <button
+                      key={`${result.event_ticker || index}-${result.title}`}
+                      ref={(el) => (autocompleteItemRefs.current[index] = el)}
+                      type="button"
+                      className={`autocomplete-item ${selectedIndex === index ? 'selected' : ''}`}
+                      onClick={() => handleAutocompleteSelect(result)}
+                      onMouseEnter={() => setSelectedIndex(index)}
+                    >
+                      <span className="autocomplete-title">{result.title}</span>
+                      <span className="autocomplete-category">{result.category}</span>
+                    </button>
+                  ))}
+                </div>
               )}
             </div>
             <button type="submit" className="search-button" disabled={loading}>
