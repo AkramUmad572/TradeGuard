@@ -53,6 +53,15 @@ export default function Landing({ onEnter, onSearch }) {
       {/* 3D Background */}
       <CandlestickTerrain />
       
+      {/* Background grid pattern */}
+      <div className="bg-grid-pattern" />
+      
+      {/* Scanning lines effect */}
+      <div className="scan-lines" />
+      
+      {/* Radial glow behind content */}
+      <div className="content-glow" />
+      
       {/* Overlay gradient */}
       <div className="landing-overlay" />
       
@@ -61,20 +70,21 @@ export default function Landing({ onEnter, onSearch }) {
         {/* Logo/Title */}
         <div className="landing-header">
           <div className="landing-logo">
-            <svg className="logo-icon-large" width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <svg className="logo-icon-large" width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" fill="url(#landing-shield-gradient)" stroke="currentColor"/>
               <defs>
                 <linearGradient id="landing-shield-gradient" x1="4" y1="2" x2="20" y2="22">
-                  <stop offset="0%" stopColor="rgba(0,255,136,0.4)"/>
-                  <stop offset="100%" stopColor="rgba(0,200,255,0.15)"/>
+                  <stop offset="0%" stopColor="rgba(0,255,136,0.5)"/>
+                  <stop offset="100%" stopColor="rgba(0,200,255,0.2)"/>
                 </linearGradient>
               </defs>
             </svg>
             <h1 className="landing-title">TRADEGUARD</h1>
           </div>
           <p className="landing-subtitle">
-            Uncover suspicious trading patterns in prediction markets using 
-            <span className="highlight"> quantitative analysis</span>
+            Uncover suspicious trading patterns in prediction markets
+            <br />
+            using <span className="highlight">quantitative analysis</span>
           </p>
         </div>
 
@@ -170,6 +180,12 @@ export default function Landing({ onEnter, onSearch }) {
           <span>Powered by Kalshi API</span>
         </div>
       </div>
+
+      {/* Corner decorations */}
+      <div className="corner-accent top-left" />
+      <div className="corner-accent top-right" />
+      <div className="corner-accent bottom-left" />
+      <div className="corner-accent bottom-right" />
 
       {/* Transition overlay */}
       <div className={`transition-overlay ${isTransitioning ? 'active' : ''}`}>
