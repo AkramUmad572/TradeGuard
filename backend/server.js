@@ -190,53 +190,126 @@ app.get('/api/tags', async (req, res) => {
   }
 });
 
-// MAIN SEARCH - Search across ALL events and markets
+// Score an event based on search relevance
+function scoreEventRelevance(event, searchTerm) {
+  let score = 0;
+  const lowerTerm = searchTerm.toLowerCase();
+  const words = lowerTerm.split(/\s+/).filter(w => w.length > 0);
+  
+  // Helper to check if text matches and calculate score
+  const scoreMatch = (text, baseScore, exactBonus = 0) => {
+    if (!text) return 0;
+    const lowerText = text.toLowerCase();
+    
+    // Exact match gets highest score
+    if (lowerText === lowerTerm) {
+      return baseScore * 3 + exactBonus;
+    }
+    
+    // Starts with search term
+    if (lowerText.startsWith(lowerTerm)) {
+      return baseScore * 2 + exactBonus;
+    }
+    
+    // Word boundary match (whole word)
+    const wordBoundaryRegex = new RegExp(`\\b${lowerTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    if (wordBoundaryRegex.test(lowerText)) {
+      return baseScore * 1.5;
+    }
+    
+    // Contains search term
+    if (lowerText.includes(lowerTerm)) {
+      return baseScore;
+    }
+    
+    // Multi-word: check if all words are present
+    if (words.length > 1) {
+      const allWordsPresent = words.every(word => lowerText.includes(word));
+      if (allWordsPresent) {
+        return baseScore * 0.8;
+      }
+    }
+    
+    return 0;
+  };
+  
+  // Score event title (highest priority)
+  score += scoreMatch(event.title, 100, 50);
+  
+  // Score event subtitle
+  score += scoreMatch(event.sub_title, 30);
+  
+  // Score market titles (check all markets, take best match)
+  let bestMarketScore = 0;
+  if (event.markets && event.markets.length > 0) {
+    for (const market of event.markets) {
+      const marketScore = 
+        scoreMatch(market.title, 40) +
+        scoreMatch(market.subtitle, 25) +
+        scoreMatch(market.yes_sub_title, 20) +
+        scoreMatch(market.no_sub_title, 20);
+      bestMarketScore = Math.max(bestMarketScore, marketScore);
+    }
+    score += bestMarketScore;
+  }
+  
+  // Score tickers (lower priority)
+  score += scoreMatch(event.event_ticker, 10) * 0.5;
+  score += scoreMatch(event.series_ticker, 10) * 0.5;
+  
+  // Category matching is deprioritized to prevent false positives
+  // Only exact category matches get a minimal score (e.g., searching "Politics" when category is "Politics")
+  // This prevents "Trump" from matching all "Politics" category items
+  if (event.category) {
+    const categoryLower = event.category.toLowerCase();
+    if (categoryLower === lowerTerm) {
+      score += 5; // Exact category match only, very low score
+    }
+    // No partial category matching - too broad and causes false positives
+  }
+  
+  return score;
+}
+
+// MAIN SEARCH - Search across ALL events and markets with relevance scoring
 app.get('/api/search', async (req, res) => {
   try {
     const { query, category, limit = 50 } = req.query;
 
     const allEvents = await getAllEvents();
     
-    let filteredEvents = allEvents;
+    let eventsToSearch = allEvents;
 
     // Filter by category if provided
     if (category && category !== 'All') {
-      filteredEvents = filteredEvents.filter(e => 
+      eventsToSearch = eventsToSearch.filter(e => 
         e.category?.toLowerCase() === category.toLowerCase()
       );
     }
 
-    // Filter by search query if provided
+    let scoredEvents = eventsToSearch;
+
+    // Score and filter by search query if provided
     if (query && query.trim()) {
-      const searchTerm = query.toLowerCase().trim();
-      filteredEvents = filteredEvents.filter(event => {
-        // Search in event fields
-        const eventMatch = 
-          event.title?.toLowerCase().includes(searchTerm) ||
-          event.sub_title?.toLowerCase().includes(searchTerm) ||
-          event.category?.toLowerCase().includes(searchTerm) ||
-          event.event_ticker?.toLowerCase().includes(searchTerm) ||
-          event.series_ticker?.toLowerCase().includes(searchTerm);
-
-        // Also search in market titles
-        const marketMatch = (event.markets || []).some(market =>
-          market.title?.toLowerCase().includes(searchTerm) ||
-          market.subtitle?.toLowerCase().includes(searchTerm) ||
-          market.ticker?.toLowerCase().includes(searchTerm) ||
-          market.yes_sub_title?.toLowerCase().includes(searchTerm) ||
-          market.no_sub_title?.toLowerCase().includes(searchTerm)
-        );
-
-        return eventMatch || marketMatch;
-      });
+      const searchTerm = query.trim();
+      
+      // Score all events
+      scoredEvents = eventsToSearch
+        .map(event => ({
+          event,
+          score: scoreEventRelevance(event, searchTerm)
+        }))
+        .filter(item => item.score > 0) // Only keep events with non-zero scores
+        .sort((a, b) => b.score - a.score) // Sort by score descending
+        .map(item => item.event); // Extract events
     }
 
     // Limit results
-    const limitedEvents = filteredEvents.slice(0, parseInt(limit));
+    const limitedEvents = scoredEvents.slice(0, parseInt(limit));
 
     res.json({
       events: limitedEvents,
-      total: filteredEvents.length,
+      total: scoredEvents.length,
       returned: limitedEvents.length,
       query: query || null,
       category: category || 'All'
