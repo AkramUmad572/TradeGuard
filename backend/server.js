@@ -78,6 +78,7 @@ function normalizeMarket(market) {
   };
 }
 
+
 // Fetch ALL events with pagination (cached)
 async function getAllEvents(forceRefresh = false) {
   const now = Date.now();
@@ -304,7 +305,7 @@ app.get('/api/search', async (req, res) => {
         .map(item => item.event); // Extract events
     }
 
-    // Limit results
+    // Limit results - return all events, let frontend handle filtering
     const limitedEvents = scoredEvents.slice(0, parseInt(limit));
 
     res.json({
@@ -352,7 +353,7 @@ app.get('/api/suggestions', async (req, res) => {
   try {
     const allEvents = await getAllEvents();
     
-    // Get events with highest volume/open interest
+    // Get events with highest volume - must have at least 1 market
     const suggestions = allEvents
       .filter(e => e.markets && e.markets.length > 0)
       .map(event => {
@@ -360,6 +361,7 @@ app.get('/api/suggestions', async (req, res) => {
         const totalOpenInterest = event.markets.reduce((sum, m) => sum + (m.open_interest || 0), 0);
         return { ...event, totalVolume, totalOpenInterest };
       })
+      .filter(e => e.totalVolume > 0) // Must have some volume
       .sort((a, b) => b.totalVolume - a.totalVolume)
       .slice(0, 20)
       .map(e => ({
@@ -447,16 +449,36 @@ app.get('/api/events/:eventTicker', async (req, res) => {
   try {
     const { eventTicker } = req.params;
 
+    // First, try to find in cached events (faster and already normalized)
+    const cachedEvents = await getAllEvents();
+    const cachedEvent = cachedEvents.find(e => e.event_ticker === eventTicker);
+    
+    if (cachedEvent && cachedEvent.markets && cachedEvent.markets.length > 0) {
+      return res.json({
+        event: cachedEvent,
+        markets: cachedEvent.markets
+      });
+    }
+
+    // Fallback to direct API call if not in cache
     const response = await eventsApi.getEvent(eventTicker, true);
     const event = response.data.event;
     
+    // Normalize nested markets if present
     if (event.markets) {
       event.markets = event.markets.map(normalizeMarket);
+    }
+    
+    // If event doesn't have nested markets, try to get from separate markets array
+    if (!event.markets || event.markets.length === 0) {
+      if (response.data.markets && response.data.markets.length > 0) {
+        event.markets = response.data.markets.map(normalizeMarket);
+      }
     }
 
     res.json({
       event,
-      markets: (response.data.markets || []).map(normalizeMarket)
+      markets: event.markets || []
     });
   } catch (error) {
     console.error('Error fetching event:', error.message);

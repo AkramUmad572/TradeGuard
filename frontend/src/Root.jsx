@@ -15,6 +15,11 @@ export default function Root() {
     setShowLanding(false);
   };
 
+  const handleGoHome = () => {
+    setShowLanding(true);
+    setInitialSearch('');
+  };
+
   if (showLanding) {
     return (
       <Landing 
@@ -24,5 +29,5 @@ export default function Root() {
     );
   }
 
-  return <App initialSearch={initialSearch} />;
+  return <App initialSearch={initialSearch} onGoHome={handleGoHome} />;
 }

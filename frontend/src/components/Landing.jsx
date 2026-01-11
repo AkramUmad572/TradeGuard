@@ -61,8 +61,16 @@ export default function Landing({ onEnter, onSearch }) {
         {/* Logo/Title */}
         <div className="landing-header">
           <div className="landing-logo">
-            <span className="logo-icon-large">◈</span>
-            <h1 className="landing-title">INSIDER DETECTOR</h1>
+            <svg className="logo-icon-large" width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" fill="url(#landing-shield-gradient)" stroke="currentColor"/>
+              <defs>
+                <linearGradient id="landing-shield-gradient" x1="4" y1="2" x2="20" y2="22">
+                  <stop offset="0%" stopColor="rgba(0,255,136,0.4)"/>
+                  <stop offset="100%" stopColor="rgba(0,200,255,0.15)"/>
+                </linearGradient>
+              </defs>
+            </svg>
+            <h1 className="landing-title">TRADEGUARD</h1>
           </div>
           <p className="landing-subtitle">
             Uncover suspicious trading patterns in prediction markets using 
@@ -113,21 +121,36 @@ export default function Landing({ onEnter, onSearch }) {
         {/* Features */}
         <div className="landing-features">
           <div className="feature-card">
-            <div className="feature-icon">📊</div>
+            <div className="feature-icon">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 3v18h18"/>
+                <path d="M18 9l-5 5-4-4-3 3"/>
+              </svg>
+            </div>
             <div className="feature-text">
               <h3>14 Detection Signals</h3>
               <p>VPIN, Benford's Law, Kyle's Lambda & more</p>
             </div>
           </div>
           <div className="feature-card">
-            <div className="feature-icon">⚡</div>
+            <div className="feature-icon">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+              </svg>
+            </div>
             <div className="feature-text">
               <h3>Real-Time Analysis</h3>
               <p>Live Kalshi market data</p>
             </div>
           </div>
           <div className="feature-card">
-            <div className="feature-icon">🎯</div>
+            <div className="feature-icon">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <circle cx="12" cy="12" r="6"/>
+                <circle cx="12" cy="12" r="2"/>
+              </svg>
+            </div>
             <div className="feature-text">
               <h3>Risk Scoring</h3>
               <p>Quantitative suspicion rating</p>

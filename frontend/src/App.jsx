@@ -19,7 +19,7 @@ const CATEGORIES = [
   'Elections'
 ];
 
-function App({ initialSearch = '' }) {
+function App({ initialSearch = '', onGoHome }) {
   const [searchQuery, setSearchQuery] = useState(initialSearch);
   const [activeCategory, setActiveCategory] = useState('All');
   const [events, setEvents] = useState([]);
@@ -35,20 +35,141 @@ function App({ initialSearch = '' }) {
   const [analyzingInsider, setAnalyzingInsider] = useState(false);
   const [expandedCategories, setExpandedCategories] = useState({});
   const [activeTab, setActiveTab] = useState('overview'); // 'overview', 'analysis', 'trades'
+  const [expandedCards, setExpandedCards] = useState({});
+  const [sortBy, setSortBy] = useState('volume'); // 'default', 'volume', 'newest', 'closing'
+  const [filterFrequency, setFilterFrequency] = useState('all'); // 'all', 'daily', 'weekly'
+  const [filterStatus, setFilterStatus] = useState('all'); // 'all', 'active', 'closed'
+  const [hideSports, setHideSports] = useState(false);
+  const [hideCrypto, setHideCrypto] = useState(false);
+  const [hideEarnings, setHideEarnings] = useState(false);
+  const [showFilterDropdown, setShowFilterDropdown] = useState(false);
+  const filterDropdownRef = useRef(null);
+  const [watchlist, setWatchlist] = useState(() => {
+    const saved = localStorage.getItem('tradeguard_watchlist');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [showWatchlist, setShowWatchlist] = useState(false);
   
   // Autocomplete state
   const [autocompleteResults, setAutocompleteResults] = useState([]);
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const [showAutocomplete, setShowAutocomplete] = useState(false);
+  const [isSearchFocused, setIsSearchFocused] = useState(false);
   const searchWrapperRef = useRef(null);
   const autocompleteTimeoutRef = useRef(null);
   const autocompleteItemRefs = useRef([]);
+  const suggestionsScrollRef = useRef(null);
+  const scrollIntervalRef = useRef(null);
+  const scrollPositionRef = useRef(0);
+  const isScrollingPausedRef = useRef(false);
+  const isProgrammaticSearchRef = useRef(false);
+  const [isScrollingPaused, setIsScrollingPaused] = useState(false);
+  
+  // Sync pause state to ref so scroll function can access it
+  useEffect(() => {
+    isScrollingPausedRef.current = isScrollingPaused;
+  }, [isScrollingPaused]);
 
   const toggleCategory = (category) => {
     setExpandedCategories(prev => ({
       ...prev,
       [category]: !prev[category]
     }));
+  };
+
+  const toggleCardExpanded = (eventTicker) => {
+    setExpandedCards(prev => ({
+      ...prev,
+      [eventTicker]: !prev[eventTicker]
+    }));
+  };
+
+  const getSortedAndFilteredEvents = () => {
+    let filtered = [...events];
+    
+    // Filter by status - only filter if explicitly set to non-all
+    if (filterStatus === 'closed') {
+      filtered = filtered.filter(event => {
+        // Check if ANY market is closed/finalized
+        return (event.markets || []).some(m => {
+          const status = (m.status || '').toLowerCase();
+          return status === 'closed' || status === 'finalized';
+        });
+      });
+    }
+    // Note: 'active' and 'all' show everything - most markets don't have explicit status
+    
+    // Filter by category (hide options)
+    if (hideSports) {
+      filtered = filtered.filter(event => 
+        event.category?.toLowerCase() !== 'sports'
+      );
+    }
+    if (hideCrypto) {
+      filtered = filtered.filter(event => 
+        event.category?.toLowerCase() !== 'crypto'
+      );
+    }
+    if (hideEarnings) {
+      filtered = filtered.filter(event => 
+        event.category?.toLowerCase() !== 'economics' && 
+        event.category?.toLowerCase() !== 'companies'
+      );
+    }
+    
+    // Filter by frequency (based on close time) - find earliest closing market
+    if (filterFrequency !== 'all') {
+      const now = new Date();
+      filtered = filtered.filter(event => {
+        // Find the earliest close time among all markets
+        const closeTimes = (event.markets || [])
+          .map(m => m.close_time ? new Date(m.close_time) : null)
+          .filter(t => t !== null && t > now); // Only future close times
+        
+        if (closeTimes.length === 0) return true; // No close time = include it
+        
+        const earliestClose = new Date(Math.min(...closeTimes));
+        const daysUntilClose = (earliestClose - now) / (1000 * 60 * 60 * 24);
+        
+        if (filterFrequency === 'daily') return daysUntilClose <= 1 && daysUntilClose >= 0;
+        if (filterFrequency === 'weekly') return daysUntilClose <= 7 && daysUntilClose >= 0;
+        return true;
+      });
+    }
+    
+    // Sort
+    if (sortBy === 'volume') {
+      filtered.sort((a, b) => {
+        const volA = (a.markets || []).reduce((sum, m) => sum + (m.volume_24h || m.volume || 0), 0);
+        const volB = (b.markets || []).reduce((sum, m) => sum + (m.volume_24h || m.volume || 0), 0);
+        return volB - volA;
+      });
+    } else if (sortBy === 'newest') {
+      filtered.sort((a, b) => {
+        // Use event creation or earliest market open time
+        const getDate = (event) => {
+          const times = (event.markets || [])
+            .map(m => m.open_time ? new Date(m.open_time) : null)
+            .filter(t => t !== null);
+          return times.length > 0 ? Math.max(...times) : 0;
+        };
+        return getDate(b) - getDate(a);
+      });
+    } else if (sortBy === 'closing') {
+      filtered.sort((a, b) => {
+        // Sort by earliest closing market
+        const getEarliestClose = (event) => {
+          const now = new Date();
+          const times = (event.markets || [])
+            .map(m => m.close_time ? new Date(m.close_time) : null)
+            .filter(t => t !== null && t > now);
+          return times.length > 0 ? Math.min(...times) : new Date('2099-01-01').getTime();
+        };
+        return getEarliestClose(a) - getEarliestClose(b);
+      });
+    }
+    
+    return filtered;
   };
 
   const exportReport = (analysis, market) => {
@@ -198,14 +319,23 @@ Risk Thresholds:
     } else {
       loadEvents();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    loadEvents();
-  }, [activeCategory]);
 
   // Autocomplete: fetch suggestions as user types
   useEffect(() => {
+    // Don't show autocomplete if search query was set programmatically (from trending click)
+    if (isProgrammaticSearchRef.current) {
+      isProgrammaticSearchRef.current = false;
+      return;
+    }
+
+    // Only show autocomplete when search input is focused
+    if (!isSearchFocused) {
+      setShowAutocomplete(false);
+      return;
+    }
+
     if (autocompleteTimeoutRef.current) {
       clearTimeout(autocompleteTimeoutRef.current);
     }
@@ -246,7 +376,8 @@ Risk Thresholds:
           }
 
           setAutocompleteResults(uniqueSuggestions);
-          setShowAutocomplete(uniqueSuggestions.length > 0);
+          // Only show if still focused
+          setShowAutocomplete(isSearchFocused && uniqueSuggestions.length > 0);
           setSelectedIndex(-1);
         }
       } catch (err) {
@@ -261,7 +392,7 @@ Risk Thresholds:
         clearTimeout(autocompleteTimeoutRef.current);
       }
     };
-  }, [searchQuery]);
+  }, [searchQuery, isSearchFocused]);
 
   // Click outside handler
   useEffect(() => {
@@ -269,6 +400,9 @@ Risk Thresholds:
       if (searchWrapperRef.current && !searchWrapperRef.current.contains(event.target)) {
         setShowAutocomplete(false);
         setSelectedIndex(-1);
+      }
+      if (filterDropdownRef.current && !filterDropdownRef.current.contains(event.target)) {
+        setShowFilterDropdown(false);
       }
     };
 
@@ -288,6 +422,75 @@ Risk Thresholds:
     }
   }, [selectedIndex]);
 
+  // Auto-scroll trending suggestions
+  useEffect(() => {
+    // Clear any existing interval first
+    if (scrollIntervalRef.current) {
+      clearInterval(scrollIntervalRef.current);
+      scrollIntervalRef.current = null;
+    }
+
+    if (!suggestionsScrollRef.current || suggestions.length === 0 || searchQuery) {
+      // Reset position when suggestions change or search is active
+      if (suggestionsScrollRef.current) {
+        suggestionsScrollRef.current.scrollTo({ left: 0, behavior: 'auto' });
+      }
+      scrollPositionRef.current = 0;
+      return;
+    }
+
+    // Small delay to ensure DOM is ready
+    const initTimeout = setTimeout(() => {
+      const scrollContainer = suggestionsScrollRef.current;
+      if (!scrollContainer) return;
+
+      // Only reset if we don't have a saved position (first time or after search cleared)
+      if (scrollPositionRef.current === 0) {
+        scrollContainer.scrollTo({ left: 0, behavior: 'auto' });
+      } else {
+        // Restore saved position
+        scrollContainer.scrollTo({ left: scrollPositionRef.current, behavior: 'auto' });
+      }
+
+      const scrollSpeed = 0.5; // pixels per frame
+      
+      const scroll = () => {
+        if (!scrollContainer) return;
+        
+        // Read pause state from ref to avoid dependency issues
+        if (isScrollingPausedRef.current) {
+          // When paused, save current position and don't scroll
+          scrollPositionRef.current = scrollContainer.scrollLeft;
+          return;
+        }
+
+        // Continue from current position (read from ref to get latest)
+        const currentPos = scrollContainer.scrollLeft;
+        scrollPositionRef.current = currentPos + scrollSpeed;
+        const contentWidth = scrollContainer.scrollWidth;
+        const halfWidth = contentWidth / 2;
+        
+        // If we've scrolled past the first set, reset to start seamlessly
+        if (scrollPositionRef.current >= halfWidth) {
+          scrollPositionRef.current = 0;
+          scrollContainer.scrollTo({ left: 0, behavior: 'auto' });
+        } else {
+          scrollContainer.scrollTo({ left: scrollPositionRef.current, behavior: 'auto' });
+        }
+      };
+
+      scrollIntervalRef.current = setInterval(scroll, 16); // ~60fps
+    }, 100);
+
+    return () => {
+      clearTimeout(initTimeout);
+      if (scrollIntervalRef.current) {
+        clearInterval(scrollIntervalRef.current);
+        scrollIntervalRef.current = null;
+      }
+    };
+  }, [suggestions, searchQuery]); // Removed isScrollingPaused from dependencies
+
   const loadSuggestions = async () => {
     try {
       const response = await fetch(`${API_BASE}/suggestions`);
@@ -300,14 +503,16 @@ Risk Thresholds:
     }
   };
 
-  const loadEvents = async () => {
+  const loadEvents = async (category = null) => {
     setLoading(true);
     setError(null);
     
+    const cat = category !== null ? category : activeCategory;
+    
     try {
-      const url = activeCategory === 'All' 
+      const url = cat === 'All' 
         ? `${API_BASE}/search?limit=100`
-        : `${API_BASE}/search?category=${encodeURIComponent(activeCategory)}&limit=100`;
+        : `${API_BASE}/search?category=${encodeURIComponent(cat)}&limit=100`;
       
       const response = await fetch(url);
       const data = await response.json();
@@ -328,6 +533,10 @@ Risk Thresholds:
 
   const handleSearch = async (e) => {
     e?.preventDefault();
+    
+    // Hide autocomplete when search is performed
+    setShowAutocomplete(false);
+    setIsSearchFocused(false);
     
     setLoading(true);
     setError(null);
@@ -354,12 +563,55 @@ Risk Thresholds:
   };
 
   const handleSuggestionClick = (suggestion) => {
-    setSearchQuery(suggestion.title);
-    setActiveCategory('All');
+    // Mark this as a programmatic search to prevent autocomplete from showing
+    isProgrammaticSearchRef.current = true;
+    
+    // Close autocomplete immediately
     setShowAutocomplete(false);
     setSelectedIndex(-1);
-    setTimeout(() => {
-      document.querySelector('.search-form')?.dispatchEvent(new Event('submit', { bubbles: true }));
+    setAutocompleteResults([]);
+    
+    // Set search query and category
+    setSearchQuery(suggestion.title);
+    setActiveCategory('All');
+    
+    // Trigger search after state updates
+    setTimeout(async () => {
+      setLoading(true);
+      setError(null);
+
+      try {
+        // If we have an event_ticker, fetch that specific event directly
+        if (suggestion.event_ticker) {
+          const response = await fetch(`${API_BASE}/events/${encodeURIComponent(suggestion.event_ticker)}`);
+          const data = await response.json();
+          
+          if (!response.ok) throw new Error(data.error || 'Event not found');
+          
+          // Wrap single event in array for display
+          const event = data.event;
+          setEvents(event ? [event] : []);
+          setStats({ total: event ? 1 : 0, returned: event ? 1 : 0 });
+        } else {
+          // Fallback to regular search
+          const params = new URLSearchParams();
+          params.set('query', suggestion.title.trim());
+          params.set('limit', '100');
+
+          const response = await fetch(`${API_BASE}/search?${params}`);
+          const data = await response.json();
+          
+          if (!response.ok) throw new Error(data.error || 'Search failed');
+          
+          setEvents(data.events || []);
+          setStats({ total: data.total, returned: data.returned });
+        }
+      } catch (err) {
+        setError(err.message);
+        setEvents([]);
+      } finally {
+        setLoading(false);
+      }
     }, 100);
   };
 
@@ -393,6 +645,7 @@ Risk Thresholds:
         } else {
           // Close autocomplete but allow normal form submission
           setShowAutocomplete(false);
+          setIsSearchFocused(false);
           setSelectedIndex(-1);
           // Don't prevent default - let form submit with current query
         }
@@ -400,6 +653,7 @@ Risk Thresholds:
       case 'Escape':
         e.preventDefault();
         setShowAutocomplete(false);
+        setIsSearchFocused(false);
         setSelectedIndex(-1);
         break;
       default:
@@ -408,8 +662,9 @@ Risk Thresholds:
   };
 
   const handleCategoryClick = (category) => {
-    setActiveCategory(category);
     setSearchQuery('');
+    setActiveCategory(category);
+    loadEvents(category);
   };
 
   const fetchMarketDetails = async (ticker) => {
@@ -465,6 +720,7 @@ Risk Thresholds:
     setSearchQuery('');
     setActiveCategory('All');
     setShowAutocomplete(false);
+    setIsSearchFocused(false);
     setSelectedIndex(-1);
     loadEvents();
   };
@@ -477,113 +733,325 @@ Risk Thresholds:
     return new Date(timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' });
   };
 
+  // Watchlist functions - now saves entire events instead of individual markets
+  const toggleWatchlist = (event) => {
+    setWatchlist(prev => {
+      const eventTicker = event.event_ticker;
+      const isInWatchlist = prev.some(e => e.event_ticker === eventTicker);
+      let newList;
+      
+      if (isInWatchlist) {
+        newList = prev.filter(e => e.event_ticker !== eventTicker);
+      } else {
+        newList = [...prev, { 
+          event_ticker: eventTicker, 
+          title: event.title,
+          category: event.category
+        }];
+      }
+      
+      localStorage.setItem('tradeguard_watchlist', JSON.stringify(newList));
+      return newList;
+    });
+  };
+
+  const isInWatchlist = (eventTicker) => {
+    return watchlist.some(e => e.event_ticker === eventTicker);
+  };
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyPress = (e) => {
+      // Focus search on '/' key
+      if (e.key === '/' && !e.target.matches('input, textarea')) {
+        e.preventDefault();
+        const searchInput = document.querySelector('.header-search-input');
+        if (searchInput) {
+          searchInput.focus();
+        }
+      }
+      
+      // Close modals/watchlist on Escape
+      if (e.key === 'Escape') {
+        if (showWatchlist) setShowWatchlist(false);
+        if (showModal) closeModal();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyPress);
+    return () => document.removeEventListener('keydown', handleKeyPress);
+  }, [showWatchlist, showModal]);
+
   return (
     <div className="app">
       <header className="header">
+        <div className="header-background"></div>
         <div className="header-content">
-          <div className="logo">
-            <span className="logo-icon">◈</span>
-            <h1>INSIDER DETECTOR</h1>
+          <div className="logo" onClick={onGoHome}>
+            <div className="logo-container">
+              <svg className="logo-icon" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" fill="url(#shield-gradient)" stroke="currentColor"/>
+                <defs>
+                  <linearGradient id="shield-gradient" x1="4" y1="2" x2="20" y2="22">
+                    <stop offset="0%" stopColor="rgba(0,255,136,0.3)"/>
+                    <stop offset="100%" stopColor="rgba(0,200,255,0.1)"/>
+                  </linearGradient>
+                </defs>
+              </svg>
+              <div className="logo-glow"></div>
+            </div>
+            <h1>TRADEGUARD</h1>
           </div>
-          <p className="tagline">Kalshi Market Explorer • DeltaHacks 12</p>
+          
+          <div className="header-right-group">
+            {/* Search Bar in Header */}
+            <div className="header-search">
+              <form onSubmit={handleSearch} className="header-search-form">
+                <div className="search-input-wrapper" ref={searchWrapperRef}>
+                  <div className="search-icon-wrapper">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="11" cy="11" r="8"></circle>
+                      <path d="m21 21-4.35-4.35"></path>
+                    </svg>
+                  </div>
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => {
+                      setSearchQuery(e.target.value);
+                    }}
+                    onKeyDown={handleKeyDown}
+                    onFocus={() => {
+                      setIsSearchFocused(true);
+                      if (autocompleteResults.length > 0 && searchQuery.trim().length >= 2) {
+                        setShowAutocomplete(true);
+                      }
+                    }}
+                    onBlur={() => {
+                      // Delay to allow click on autocomplete items
+                      setTimeout(() => {
+                        setIsSearchFocused(false);
+                        setShowAutocomplete(false);
+                      }, 200);
+                    }}
+                    placeholder="Search markets... (Press / to focus)"
+                    className="header-search-input"
+                  />
+                  {searchQuery && (
+                    <button type="button" className="clear-btn" onClick={() => {
+                      clearSearch();
+                      setShowAutocomplete(false);
+                      setSelectedIndex(-1);
+                    }}>✕</button>
+                  )}
+                  
+                  {/* Autocomplete Dropdown - Only show when focused and not after search */}
+                  {showAutocomplete && isSearchFocused && autocompleteResults.length > 0 && (
+                    <div className="autocomplete-dropdown">
+                      {autocompleteResults.map((result, index) => (
+                        <button
+                          key={`${result.event_ticker || index}-${result.title}`}
+                          ref={(el) => (autocompleteItemRefs.current[index] = el)}
+                          type="button"
+                          className={`autocomplete-item ${selectedIndex === index ? 'selected' : ''}`}
+                          onClick={() => {
+                            handleAutocompleteSelect(result);
+                            setIsSearchFocused(false);
+                          }}
+                          onMouseEnter={() => setSelectedIndex(index)}
+                        >
+                          <span className="autocomplete-title">{result.title}</span>
+                          <span className="autocomplete-category">{result.category}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </form>
+            </div>
+
+            <div className="header-actions">
+              <button 
+                className="watchlist-btn"
+                onClick={() => setShowWatchlist(!showWatchlist)}
+                title={`Watchlist (${watchlist.length})`}
+              >
+                <svg className="watchlist-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" fill="currentColor" opacity="0.3"></polygon>
+                </svg>
+                {watchlist.length > 0 && <span className="watchlist-count">{watchlist.length}</span>}
+              </button>
+              <a href="#" className="header-link" onClick={(e) => { e.preventDefault(); }}>
+                <svg className="link-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <path d="M12 16v-4"></path>
+                  <path d="M12 8h.01"></path>
+                </svg>
+                How it works
+              </a>
+            </div>
+          </div>
         </div>
       </header>
 
       <main className="main">
-        {/* Category Tabs */}
-        <nav className="category-tabs">
-          {CATEGORIES.map(category => (
-            <button
-              key={category}
-              className={`category-tab ${activeCategory === category ? 'active' : ''}`}
-              onClick={() => handleCategoryClick(category)}
-            >
-              {category}
-            </button>
-          ))}
-        </nav>
-
-        {/* Search Section */}
-        <section className="search-section">
-          <form onSubmit={handleSearch} className="search-form">
-            <div className="search-input-wrapper" ref={searchWrapperRef}>
-              <span className="search-icon">🔍</span>
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => {
-                  setSearchQuery(e.target.value);
-                  setShowAutocomplete(true);
-                }}
-                onKeyDown={handleKeyDown}
-                onFocus={() => {
-                  if (autocompleteResults.length > 0 && searchQuery.trim().length >= 2) {
-                    setShowAutocomplete(true);
-                  }
-                }}
-                placeholder="Search any market... bitcoin, trump, earthquake, AI..."
-                className="search-input"
-              />
-              {searchQuery && (
-                <button type="button" className="clear-btn" onClick={() => {
-                  clearSearch();
-                  setShowAutocomplete(false);
-                  setSelectedIndex(-1);
-                }}>✕</button>
-              )}
-              
-              {/* Autocomplete Dropdown */}
-              {showAutocomplete && autocompleteResults.length > 0 && (
-                <div className="autocomplete-dropdown">
-                  {autocompleteResults.map((result, index) => (
-                    <button
-                      key={`${result.event_ticker || index}-${result.title}`}
-                      ref={(el) => (autocompleteItemRefs.current[index] = el)}
-                      type="button"
-                      className={`autocomplete-item ${selectedIndex === index ? 'selected' : ''}`}
-                      onClick={() => handleAutocompleteSelect(result)}
-                      onMouseEnter={() => setSelectedIndex(index)}
-                    >
-                      <span className="autocomplete-title">{result.title}</span>
-                      <span className="autocomplete-category">{result.category}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            <button type="submit" className="search-button" disabled={loading}>
-              {loading ? 'SEARCHING...' : 'SEARCH'}
-            </button>
-          </form>
-        </section>
-
-        {/* Suggestion Chips */}
+        {/* Trending Ticker */}
         {suggestions.length > 0 && !searchQuery && (
-          <section className="suggestions-section">
-            <div className="suggestions-label">Trending:</div>
-            <div className="suggestions-chips">
-              {suggestions.slice(0, 8).map((suggestion, idx) => (
+          <div className="trending-ticker">
+            <div className="ticker-label">
+              <svg className="ticker-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" fill="rgba(0,255,136,0.2)"></path>
+              </svg>
+              <span>TRENDING</span>
+            </div>
+            <div 
+              className="ticker-track"
+              ref={suggestionsScrollRef}
+              onMouseEnter={() => setIsScrollingPaused(true)}
+              onMouseLeave={() => setIsScrollingPaused(false)}
+            >
+              {[...suggestions.slice(0, 8), ...suggestions.slice(0, 8)].map((suggestion, idx) => (
                 <button
-                  key={idx}
-                  className="suggestion-chip"
-                  onClick={() => handleSuggestionClick(suggestion)}
+                  key={`${idx}-${suggestion.title}`}
+                  className="ticker-item"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    handleSuggestionClick(suggestion);
+                  }}
+                  type="button"
                 >
-                  {suggestion.title.length > 35 
-                    ? suggestion.title.substring(0, 35) + '...' 
+                  {suggestion.title.length > 45 
+                    ? suggestion.title.substring(0, 45) + '...' 
                     : suggestion.title}
                 </button>
               ))}
             </div>
-          </section>
+          </div>
         )}
 
-        {/* Stats Bar */}
-        <div className="stats-bar">
-          <span className="stats-category">{activeCategory}</span>
-          <span className="stats-count">
-            {stats.total > 0 && `Showing ${stats.returned} of ${stats.total} events`}
-            {searchQuery && ` matching "${searchQuery}"`}
+        {/* Category Tabs & Filter Button */}
+        <div className="controls-row">
+          <nav className="category-tabs">
+            {CATEGORIES.map(category => (
+              <button
+                key={category}
+                className={`category-tab ${activeCategory === category ? 'active' : ''}`}
+                onClick={() => handleCategoryClick(category)}
+              >
+                {category}
+              </button>
+            ))}
+          </nav>
+          
+          <div className="filter-controls" ref={filterDropdownRef}>
+            <button 
+              className="filter-icon-btn"
+              onClick={() => setShowFilterDropdown(!showFilterDropdown)}
+              title="Filter options"
+            >
+              <svg className="filter-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="4" y1="6" x2="20" y2="6"></line>
+                <circle cx="8" cy="6" r="2" fill="currentColor"></circle>
+                <line x1="4" y1="12" x2="20" y2="12"></line>
+                <circle cx="16" cy="12" r="2" fill="currentColor"></circle>
+                <line x1="4" y1="18" x2="20" y2="18"></line>
+                <circle cx="12" cy="18" r="2" fill="currentColor"></circle>
+              </svg>
+              {(sortBy !== 'default' || filterFrequency !== 'all' || filterStatus !== 'active' || hideSports || hideCrypto || hideEarnings) && (
+                <span className="filter-badge"></span>
+              )}
+            </button>
+            
+            {showFilterDropdown && (
+              <div className="filter-dropdown">
+                {/* Filter Bar */}
+                <div className="filter-bar">
+                  {/* Sort By Dropdown */}
+                  <div className="filter-item dropdown">
+                    <span className="filter-item-label">Sort by:</span>
+                    <select 
+                      value={sortBy} 
+                      onChange={(e) => setSortBy(e.target.value)}
+                      className="filter-select"
+                    >
+                      <option value="volume">24hr Volume</option>
+                      <option value="newest">Newest</option>
+                      <option value="closing">Closing Soon</option>
+                      <option value="default">Default</option>
+                    </select>
+                  </div>
+
+                  {/* Frequency Dropdown */}
+                  <div className="filter-item dropdown">
+                    <span className="filter-item-label">Frequency:</span>
+                    <select 
+                      value={filterFrequency} 
+                      onChange={(e) => setFilterFrequency(e.target.value)}
+                      className="filter-select"
+                    >
+                      <option value="all">All</option>
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                    </select>
+                  </div>
+
+                  {/* Status Dropdown */}
+                  <div className="filter-item dropdown">
+                    <span className="filter-item-label">Status:</span>
+                    <select 
+                      value={filterStatus} 
+                      onChange={(e) => setFilterStatus(e.target.value)}
+                      className="filter-select"
+                    >
+                      <option value="active">Active</option>
+                      <option value="all">All</option>
+                      <option value="closed">Closed</option>
+                    </select>
+                  </div>
+
+                  {/* Checkbox Filters */}
+                  <label className="filter-checkbox">
+                    <input 
+                      type="checkbox" 
+                      checked={hideSports}
+                      onChange={(e) => setHideSports(e.target.checked)}
+                    />
+                    <span className="checkbox-custom"></span>
+                    <span className="checkbox-label">Hide sports?</span>
+                  </label>
+
+                  <label className="filter-checkbox">
+                    <input 
+                      type="checkbox" 
+                      checked={hideCrypto}
+                      onChange={(e) => setHideCrypto(e.target.checked)}
+                    />
+                    <span className="checkbox-custom"></span>
+                    <span className="checkbox-label">Hide crypto?</span>
+                  </label>
+
+                  <label className="filter-checkbox">
+                    <input 
+                      type="checkbox" 
+                      checked={hideEarnings}
+                      onChange={(e) => setHideEarnings(e.target.checked)}
+                    />
+                    <span className="checkbox-custom"></span>
+                    <span className="checkbox-label">Hide earnings?</span>
+                  </label>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Results Info */}
+        <div className="results-info">
+          <span className="results-count">
+            {stats.total > 0 ? `${getSortedAndFilteredEvents().length} markets` : 'Loading...'}
           </span>
+          {searchQuery && <span className="results-query">for "{searchQuery}"</span>}
         </div>
 
         {/* Error Display */}
@@ -611,50 +1079,142 @@ Risk Thresholds:
           )}
 
           <div className="events-grid">
-            {events.map((event, eventIdx) => (
-              <div key={event.event_ticker || eventIdx} className="event-card">
+            {getSortedAndFilteredEvents().map((event, eventIdx) => {
+              const firstMarket = event.markets?.[0];
+              const totalVolume = (event.markets || []).reduce((sum, m) => sum + (m.volume || 0), 0);
+              const isExpanded = expandedCards[event.event_ticker];
+              const marketsToShow = isExpanded ? event.markets : (event.markets || []).slice(0, 3);
+              const hasMoreMarkets = (event.markets?.length || 0) > 3;
+              const getCategoryIcon = (cat) => {
+                const iconPaths = {
+                  'Politics': <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/></svg>,
+                  'Crypto': <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 8h6m-6 4h6m-3-8v2m0 12v2M6 12a6 6 0 1 0 12 0 6 6 0 0 0-12 0z"/></svg>,
+                  'Sports': <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20M2 12h20"/></svg>,
+                  'Economics': <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v18h18M7 16l4-4 4 4 5-6"/></svg>,
+                  'Climate and Weather': <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h4m12 0h4M12 2v4m0 12v4"/></svg>,
+                  'World': <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>,
+                  'Science and Technology': <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 3h6v11a3 3 0 1 1-6 0V3zM4 21h16M12 17v4"/></svg>,
+                  'Companies': <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>,
+                  'Entertainment': <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3V9z"/></svg>,
+                  'Health': <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19.5 12.572l-7.5 7.428-7.5-7.428a5 5 0 1 1 7.5-6.566 5 5 0 1 1 7.5 6.566z"/></svg>,
+                  'Elections': <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 11l3 3 8-8M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>
+                };
+                return iconPaths[cat] || <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v18h18M7 16l4-4 4 4 5-6"/></svg>;
+              };
+              return (
+              <div 
+                key={event.event_ticker || eventIdx} 
+                className={`event-card ${isExpanded ? 'expanded' : ''}`}
+                onClick={() => {
+                  if (firstMarket) {
+                    handleSelectMarket(firstMarket);
+                  }
+                }}
+              >
                 <div className="event-header">
-                  <span className="event-category">{event.category}</span>
-                  {event.markets?.length > 1 && (
-                    <span className="market-count">{event.markets.length} markets</span>
-                  )}
+                  <div className="event-category-wrapper">
+                    <span className="category-icon">{getCategoryIcon(event.category)}</span>
+                    <span className="event-category">{event.category}</span>
+                  </div>
+                  <div className="event-meta">
+                    {totalVolume > 0 && (
+                      <span className="event-volume" title="Total Volume">
+                        <svg className="volume-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M3 3v18h18M7 16l4-4 4 4 5-6"/>
+                        </svg>
+                        {totalVolume >= 1000 ? `${(totalVolume / 1000).toFixed(1)}K` : totalVolume}
+                      </span>
+                    )}
+                    {event.markets?.length > 1 && (
+                      <span className="market-count">{event.markets.length} markets</span>
+                    )}
+                    <button
+                      className={`event-watchlist-star ${isInWatchlist(event.event_ticker) ? 'active' : ''}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleWatchlist(event);
+                      }}
+                      title={isInWatchlist(event.event_ticker) ? 'Remove event from watchlist' : 'Add event to watchlist'}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                      </svg>
+                    </button>
+                  </div>
                 </div>
                 <h3 className="event-title">{event.title}</h3>
-                {event.sub_title && <p className="event-subtitle">{event.sub_title}</p>}
+                {event.sub_title && (
+                  <p className="event-subtitle">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginRight: '0.4rem', verticalAlign: 'middle'}}>
+                      <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
+                    </svg>
+                    {event.sub_title}
+                  </p>
+                )}
                 
                 <div className="markets-list">
-                  {(event.markets || []).slice(0, 5).map((market) => (
+                  {(marketsToShow || []).map((market) => {
+                    // Get actual bid prices like Kalshi displays
+                    const yesBid = Math.round((market.yes_bid || market.last_price || 0) * 100);
+                    const noBid = Math.round((market.no_bid || (1 - (market.last_price || 0))) * 100);
+                    const probClass = yesBid >= 70 ? 'high' : yesBid >= 40 ? 'medium' : 'low';
+                    return (
                     <div
                       key={market.ticker}
                       className="market-row"
-                      onClick={() => handleSelectMarket(market)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleSelectMarket(market);
+                      }}
                     >
                       <div className="market-info">
                         <span className="market-subtitle">
                           {market.yes_sub_title || market.subtitle || market.title}
                         </span>
+                        {market.volume > 0 && (
+                          <span className="market-volume-small">
+                            Vol: {market.volume >= 1000 ? `${(market.volume / 1000).toFixed(1)}K` : market.volume}
+                          </span>
+                        )}
                       </div>
                       <div className="market-prices">
-                        <span className="price-display">
-                          <span className="price-value">
-                            {Math.round((market.yes_bid || market.last_price || 0) * 100)}%
+                        <div className="probability-wrapper">
+                          <span className={`probability-value ${probClass}`}>
+                            {yesBid}%
                           </span>
-                        </span>
+                          <div className="probability-bar">
+                            <div 
+                              className={`probability-fill ${probClass}`} 
+                              style={{ width: `${yesBid}%` }}
+                            ></div>
+                          </div>
+                        </div>
                         <div className="price-buttons">
                           <span className="yes-btn">Yes</span>
                           <span className="no-btn">No</span>
                         </div>
                       </div>
                     </div>
-                  ))}
-                  {(event.markets?.length || 0) > 5 && (
-                    <div className="more-markets">
-                      +{event.markets.length - 5} more markets
-                    </div>
+                    );
+                  })}
+                  {hasMoreMarkets && (
+                    <button 
+                      className="more-markets"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleCardExpanded(event.event_ticker);
+                      }}
+                    >
+                      {isExpanded 
+                        ? '▲ Show less' 
+                        : `▼ +${event.markets.length - 3} more markets`
+                      }
+                    </button>
                   )}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       </main>
@@ -683,17 +1243,40 @@ Risk Thresholds:
                   <h2 className="modal-title-clean">{marketDetails.market?.title}</h2>
                 </div>
 
-                {/* Price Cards */}
-                <div className="price-cards">
-                  <div className="price-card yes">
-                    <div className="price-main">{Math.round((marketDetails.market?.yes_bid || 0) * 100)}¢</div>
-                    <div className="price-label-clean">YES</div>
-                  </div>
-                  <div className="price-card no">
-                    <div className="price-main">{Math.round((marketDetails.market?.no_bid || 0) * 100)}¢</div>
-                    <div className="price-label-clean">NO</div>
-                  </div>
-                </div>
+                {/* Price Cards - Show actual bid prices like Kalshi */}
+                {(() => {
+                  const market = marketDetails.market;
+                  const isFinalized = market?.status?.toLowerCase() === 'finalized' || market?.status?.toLowerCase() === 'closed';
+                  
+                  // Show actual bid prices (what you can sell at)
+                  // These may not sum to 100 due to the bid-ask spread
+                  let yesBid, noBid;
+                  
+                  if (market?.result === 'yes') {
+                    yesBid = 100;
+                    noBid = 0;
+                  } else if (market?.result === 'no') {
+                    yesBid = 0;
+                    noBid = 100;
+                  } else {
+                    // Active markets - use actual bid prices from API
+                    yesBid = Math.round((market?.yes_bid || market?.last_price || 0) * 100);
+                    noBid = Math.round((market?.no_bid || (1 - (market?.last_price || 0))) * 100);
+                  }
+                  
+                  return (
+                    <div className="price-cards">
+                      <div className="price-card yes">
+                        <div className="price-main">{yesBid}¢</div>
+                        <div className="price-label-clean">Yes {isFinalized && market?.result === 'yes' && '✓ WON'}</div>
+                      </div>
+                      <div className="price-card no">
+                        <div className="price-main">{noBid}¢</div>
+                        <div className="price-label-clean">No {isFinalized && market?.result === 'no' && '✓ WON'}</div>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Tab Navigation */}
                 <div className="modal-tabs">
@@ -701,19 +1284,22 @@ Risk Thresholds:
                     className={`modal-tab ${activeTab === 'overview' ? 'active' : ''}`}
                     onClick={() => setActiveTab('overview')}
                   >
-                    📊 Overview
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v18h18M7 16l4-4 4 4 5-6"/></svg>
+                    Overview
                   </button>
                   <button 
                     className={`modal-tab ${activeTab === 'analysis' ? 'active' : ''}`}
                     onClick={() => setActiveTab('analysis')}
                   >
-                    🔍 Insider Detection
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                    Insider Detection
                   </button>
                   <button 
                     className={`modal-tab ${activeTab === 'trades' ? 'active' : ''}`}
                     onClick={() => setActiveTab('trades')}
                   >
-                    📈 Market Data
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20V10M6 20V4M18 20v-6"/></svg>
+                    Market Data
                   </button>
                 </div>
 
@@ -736,6 +1322,32 @@ Risk Thresholds:
                           <span className="qs-value">{marketDetails.market?.volume_24h?.toLocaleString() || '0'}</span>
                           <span className="qs-label">24h Volume</span>
                         </div>
+                        <div className="quick-stat">
+                          <span className="qs-value">
+                            {marketDetails.market?.last_price 
+                              ? `${Math.round(marketDetails.market.last_price * 100)}¢` 
+                              : 'N/A'}
+                          </span>
+                          <span className="qs-label">Last Trade</span>
+                        </div>
+                        {marketDetails.market?.yes_bid > 0 && marketDetails.market?.yes_ask > 0 && (
+                          <div className="quick-stat">
+                            <span className="qs-value">
+                              {Math.round(marketDetails.market.yes_bid * 100)}¢ / {Math.round(marketDetails.market.yes_ask * 100)}¢
+                            </span>
+                            <span className="qs-label">Bid / Ask</span>
+                          </div>
+                        )}
+                        {marketDetails.market?.close_time && (
+                          <div className="quick-stat">
+                            <span className="qs-value">
+                              {new Date(marketDetails.market.close_time).toLocaleDateString()}
+                            </span>
+                            <span className="qs-label">
+                              {new Date(marketDetails.market.close_time) > new Date() ? 'Closes' : 'Closed'}
+                            </span>
+                          </div>
+                        )}
                       </div>
 
                       {/* Price Chart */}
@@ -801,7 +1413,11 @@ Risk Thresholds:
                     <div className="tab-pane">
                       {!insiderAnalysis && !analyzingInsider && (
                         <div className="analysis-prompt">
-                          <div className="prompt-icon">🔍</div>
+                          <div className="prompt-icon">
+                            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                              <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                            </svg>
+                          </div>
                           <h3>Insider Trading Detection</h3>
                           <p>Run our quantitative analysis to detect suspicious trading patterns in this market.</p>
                           <button 
@@ -1065,6 +1681,77 @@ Risk Thresholds:
                 <p>Failed to load market details</p>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Watchlist Sidebar */}
+      {showWatchlist && (
+        <div className="watchlist-overlay" onClick={() => setShowWatchlist(false)}>
+          <div className="watchlist-sidebar" onClick={(e) => e.stopPropagation()}>
+            <div className="watchlist-header">
+              <h3>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1" style={{marginRight: '0.5rem', verticalAlign: 'middle'}}>
+                  <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                </svg>
+                Watchlist
+              </h3>
+              <button className="watchlist-close" onClick={() => setShowWatchlist(false)}>✕</button>
+            </div>
+            <div className="watchlist-content">
+              {watchlist.length === 0 ? (
+                <div className="watchlist-empty">
+                  <p>No events in watchlist</p>
+                  <p className="watchlist-hint">Click the star on any market to add the event</p>
+                </div>
+              ) : (
+                <div className="watchlist-items">
+                  {watchlist.map((item) => {
+                    const event = events.find(e => e.event_ticker === item.event_ticker);
+                    
+                    if (!event) return null;
+                    
+                    const firstMarket = event.markets?.[0];
+                    const totalVolume = (event.markets || []).reduce((sum, m) => sum + (m.volume || 0), 0);
+                    // Use yes_bid (actual bid price) like Kalshi
+                    const yesBid = Math.round((firstMarket?.yes_bid || firstMarket?.last_price || 0) * 100);
+                    
+                    return (
+                      <div
+                        key={item.event_ticker}
+                        className="watchlist-item"
+                        onClick={() => {
+                          if (firstMarket) {
+                            handleSelectMarket(firstMarket);
+                          }
+                          setShowWatchlist(false);
+                        }}
+                      >
+                        <div className="watchlist-item-info">
+                          <span className="watchlist-item-title">{item.title}</span>
+                          <span className="watchlist-item-ticker">{item.event_ticker}</span>
+                          {event.markets?.length > 1 && (
+                            <span className="watchlist-item-meta">{event.markets.length} markets</span>
+                          )}
+                        </div>
+                        <div className="watchlist-item-price">
+                          {firstMarket && <span className="watchlist-probability">{yesBid}¢</span>}
+                          <button
+                            className="watchlist-remove"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleWatchlist(event);
+                            }}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
